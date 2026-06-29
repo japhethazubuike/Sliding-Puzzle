@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>TMS School Puzzle</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#B8B8B0;font-family:sans-serif;}
+input,select,button{font-family:inherit;}
+@keyframes pop{0%{transform:scale(.88);}60%{transform:scale(1.06);}100%{transform:scale(1);}}
+@keyframes tada{0%,100%{transform:scale(1) rotate(0);}10%,90%{transform:scale(.9) rotate(-2deg);}20%,80%{transform:scale(1.1) rotate(2deg);}30%,50%,70%{transform:scale(1.1) rotate(-2deg);}40%,60%{transform:scale(1.1) rotate(2deg);}}
+@keyframes shimmer{0%{background-position:-200% 0;}100%{background-position:200% 0;}}
+.win-anim{animation:tada .8s ease-in-out;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+/* ── JSONBin cross-device sync (optional) ── */
+const JSONBIN_ID  = "";
+const JSONBIN_KEY = "";
+const LS_KEY     = "tms_puzzle_lb_v3";
+const SCHOOL_KEY = "tms_puzzle_school";
+
+/* ── School info ── */
+const SCHOOL_NAME = "Tonti Model School";
+const SCHOOL_MOTTO = "Grooming the Proper Child";
+
+const ROLES   = ["Pupil","Staff","Parent"];
+const CLASSES = ["Primary 1","Primary 2","Primary 3","Primary 4","Primary 5","Primary 6","Staff","Parent/Guardian"];
+
+/* ═══════════════════════════════════════════
+   PICTURE PUZZLE CATEGORIES
+   Each category defines what gets drawn on each tile via SVG/Canvas
+═══════════════════════════════════════════ */
+const CATEGORIES = [
+  { id:"numbers", label:"Numbers", icon:"🔢", desc:"Classic number sliding puzzle", color:"#1A8C8C" },
+  { id:"logo",    label:"TMS Logo", icon:"🏫", desc:"Rearrange the school logo", color:"#8B0000" },
+  { id:"alphabet",label:"Alphabet", icon:"🔤", desc:"Put the letters in order A→Z", color:"#6A1B9A" },
+  { id:"plant",   label:"Plant",    icon:"🌿", desc:"Rearrange the flower picture", color:"#2E7D32" },
+  { id:"animal",  label:"Animal",   icon:"🐄", desc:"Rearrange the animal picture", color:"#E65100" },
+];
+
+/* ── Colors ── */
+const C = {
+  teal:"#1A8C8C",tealD:"#136E6E",tealL:"#E6F7F7",
+  gold:"#C8931A",goldL:"#FFF3D0",
+  woodL:"#D4A96A",woodM:"#B8864E",woodD:"#7A4F2D",
+  dark:"#4A3020",text:"#5C3A0A",
+  red:"#8B0000",redL:"#FFEBEE",
+  bg:"#B8B8B0",white:"#fff",
+  green:"#2E7D32",greenL:"#E8F5E9",
+  purple:"#6A1B9A",purpleL:"#F3E5F5",
+  orange:"#E65100",orangeL:"#FFF3E0",
+};
+const pill=(bg,color,extra={})=>({background:bg,color,padding:"3px 10px",borderRadius:20,fontSize:12,fontWeight:"bold",display:"inline-block",...extra});
+
+/* ═══════════════════════════════════════════
+   PUZZLE LOGIC
+═══════════════════════════════════════════ */
+function goalState(n){const g=[];for(let i=1;i<n*n;i++)g.push(i);g.push(0);return g;}
+function isSolved(t){const n=Math.round(Math.sqrt(t.length));return goalState(n).every((v,i)=>v===t[i]);}
+function isSolvable(t,n){
+  let inv=0;const arr=t.filter(x=>x!==0);
+  for(let i=0;i<arr.length;i++)for(let j=i+1;j<arr.length;j++)if(arr[i]>arr[j])inv++;
+  if(n%2===1)return inv%2===0;
+  const rfb=n-1-Math.floor(t.indexOf(0)/n);
+  return(inv+rfb)%2===0;
+}
+function shuffleTiles(n){
+  let t;
+  do{
+    t=Array.from({length:n*n},(_,i)=>i);
+    for(let i=t.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[t[i],t[j]]=[t[j],t[i]];}
+  }while(!isSolvable(t,n)||isSolved(t));
+  return t;
+}
+function manhattan(t,n){let d=0;t.forEach((v,i)=>{if(!v)return;const gr=Math.floor((v-1)/n),gc=(v-1)%n,cr=Math.floor(i/n),cc=i%n;d+=Math.abs(gr-cr)+Math.abs(gc-cc);});return d;}
+function getNeighbors(t,n){
+  const e=t.indexOf(0),er=Math.floor(e/n),ec=e%n,out=[];
+  [[-1,0],[1,0],[0,-1],[0,1]].forEach(([dr,dc])=>{
+    const nr=er+dr,nc=ec+dc;if(nr<0||nr>=n||nc<0||nc>=n)return;
+    const ni=nr*n+nc,nt=[...t];[nt[e],nt[ni]]=[nt[ni],nt[e]];out.push({state:nt,moved:ni});
+  });return out;
+}
+function astar(start,n){
+  if(n>3)return null;
+  const goal=goalState(n).join(','),open=new Map();
+  open.set(start.join(','),{t:start,g:0,f:manhattan(start,n),path:[]});
+  const closed=new Set();
+  for(let iter=0;iter<250000;iter++){
+    if(!open.size)return null;
+    let best=null,bestF=Infinity;
+    for(const[k,v]of open)if(v.f<bestF){bestF=v.f;best=k;}
+    const cur=open.get(best);open.delete(best);
+    if(best===goal)return cur.path;
+    closed.add(best);
+    for(const nb of getNeighbors(cur.t,n)){
+      const nk=nb.state.join(',');if(closed.has(nk))continue;
+      const g=cur.g+1,h=manhattan(nb.state,n);
+      if(!open.has(nk)||open.get(nk).g>g)open.set(nk,{t:nb.state,g,f:g+h,path:[...cur.path,nb.moved]});
+    }
+  }return null;
+}
+function fmtTime(s){return`${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;}
+function scoreCalc(steps,sec,size,cat){
+  const base=cat==="numbers"?(size===3?1000:2500):(size===3?1200:3000);
+  return Math.max(0,Math.round(base-steps*5-sec*2));
+}
+function rankColor(i){return i===0?"#FFD700":i===1?"#C0C0C0":i===2?"#CD7F32":"#e0e0e0";}
+
+/* ── JSONBin sync ── */
+async function fetchRemote(){
+  if(!JSONBIN_ID||!JSONBIN_KEY)return null;
+  try{const r=await fetch(`https://api.jsonbin.io/v3/b/${JSONBIN_ID}/latest`,{headers:{"X-Master-Key":JSONBIN_KEY}});const d=await r.json();return d.record?.leaderboard||[];}catch(e){return null;}
+}
+async function pushRemote(board){
+  if(!JSONBIN_ID||!JSONBIN_KEY)return;
+  try{await fetch(`https://api.jsonbin.io/v3/b/${JSONBIN_ID}`,{method:"PUT",headers:{"Content-Type":"application/json","X-Master-Key":JSONBIN_KEY},body:JSON.stringify({leaderboard:board})});}catch(e){}
+}
+function mergeBoards(a,b){
+  const map=new Map();
+  [...a,...b].forEach(e=>{const k=`${e.name}|${e.score}|${e.date}|${e.cat||"numbers"}`;if(!map.has(k))map.set(k,e);});
+  return[...map.values()].sort((a,b)=>b.score-a.score).slice(0,200);
+}
+
+/* ═══════════════════════════════════════════
+   SVG TILE RENDERERS
+   Each category draws its tile as inline SVG
+═══════════════════════════════════════════ */
+
+/* TMS Logo — draw partial crest per tile position */
+function LogoTile({pos, n, size}){
+  // pos = 1-based tile value (which piece of the image)
+  const row=Math.floor((pos-1)/n), col=(pos-1)%n;
+  const pct=100/n;
+  // Colors: maroon globe, blue letters, blue wreath
+  const colors=["#8B0000","#00008B","#C00020","#001090","#A00010","#0000A0","#900000","#0000C0","#B00020"];
+  const shapes=[];
+  // Each tile shows a portion of the crest
+  if(row===0&&col===0) shapes.push(<circle key="c" cx="50" cy="50" r="44" fill="#8B0000" stroke="#00008B" strokeWidth="4"/>,<text key="t" x="50" y="58" textAnchor="middle" fontSize="32" fontWeight="bold" fill="#00008B">T</text>);
+  else if(row===0&&col===1) shapes.push(<text key="t" x="50" y="58" textAnchor="middle" fontSize="28" fontWeight="bold" fill="#8B0000">TONTI</text>);
+  else if(row===0&&col===2) shapes.push(<text key="t" x="50" y="45" textAnchor="middle" fontSize="22" fontWeight="bold" fill="#8B0000">MODEL</text>,<text key="t2" x="50" y="68" textAnchor="middle" fontSize="22" fontWeight="bold" fill="#8B0000">SCHOOL</text>);
+  else if(row===1&&col===0) shapes.push(<circle key="g" cx="50" cy="50" r="36" fill="none" stroke="#8B0000" strokeWidth="3"/>,<text key="t" x="50" y="58" textAnchor="middle" fontSize="34" fontWeight="bold" fill="#8B0000">M</text>);
+  else if(row===1&&col===1){
+    // Globe lines
+    shapes.push(
+      <circle key="g" cx="50" cy="50" r="38" fill="#8B0000" stroke="#00008B" strokeWidth="3"/>,
+      <line key="l1" x1="12" y1="50" x2="88" y2="50" stroke="#fff" strokeWidth="1.5" opacity="0.5"/>,
+      <line key="l2" x1="50" y1="12" x2="50" y2="88" stroke="#fff" strokeWidth="1.5" opacity="0.5"/>,
+      <ellipse key="e" cx="50" cy="50" rx="20" ry="38" fill="none" stroke="#fff" strokeWidth="1.5" opacity="0.5"/>,
+      <text key="t" x="50" y="58" textAnchor="middle" fontSize="30" fontWeight="bold" fill="#00008B">S</text>
+    );
+  }
+  else if(row===1&&col===2) shapes.push(
+    <path key="w" d="M50,10 Q30,20 20,40 Q30,35 50,30 Q70,35 80,40 Q70,20 50,10Z" fill="#00008B"/>,
+    <path key="w2" d="M50,90 Q30,80 20,60 Q30,65 50,70 Q70,65 80,60 Q70,80 50,90Z" fill="#00008B"/>
+  );
+  else if(row===2&&col===0) shapes.push(
+    <path key="w" d="M10,20 Q5,40 10,60 Q20,45 15,30Z" fill="#00008B"/>,
+    <path key="w2" d="M15,25 Q8,45 12,65 Q25,50 18,35Z" fill="#00008B" opacity="0.7"/>
+  );
+  else if(row===2&&col===1) shapes.push(
+    <rect key="r" x="8" y="62" width="84" height="28" rx="14" fill="#00008B"/>,
+    <text key="t" x="50" y="81" textAnchor="middle" fontSize="11" fontWeight="bold" fill="#fff">Grooming the</text>
+  );
+  else shapes.push(
+    <rect key="r" x="8" y="62" width="84" height="28" rx="14" fill="#00008B"/>,
+    <text key="t" x="50" y="81" textAnchor="middle" fontSize="11" fontWeight="bold" fill="#fff">Proper Child</text>,
+    <path key="w" d="M90,20 Q95,40 90,60 Q80,45 85,30Z" fill="#00008B"/>,
+    <path key="w2" d="M85,25 Q92,45 88,65 Q75,50 82,35Z" fill="#00008B" opacity="0.7"/>
+  );
+  return(
+    <svg viewBox="0 0 100 100" width="100%" height="100%">
+      <rect width="100" height="100" fill="#fff"/>
+      {shapes}
+    </svg>
+  );
+}
+
+/* Full TMS Logo SVG (for preview) */
+function TMSLogoFull(){
+  return(
+    <svg viewBox="0 0 200 200" width="100%" height="100%">
+      <rect width="200" height="200" fill="#fff"/>
+      {/* Outer ring */}
+      <circle cx="100" cy="95" r="78" fill="#fff" stroke="#00008B" strokeWidth="6"/>
+      {/* Globe */}
+      <circle cx="100" cy="95" r="62" fill="#8B0000"/>
+      {/* Globe lines */}
+      <line x1="38" y1="95" x2="162" y2="95" stroke="#fff" strokeWidth="1.5" opacity="0.4"/>
+      <line x1="100" y1="33" x2="100" y2="157" stroke="#fff" strokeWidth="1.5" opacity="0.4"/>
+      <ellipse cx="100" cy="95" rx="30" ry="62" fill="none" stroke="#fff" strokeWidth="1.5" opacity="0.4"/>
+      <ellipse cx="100" cy="95" rx="50" ry="62" fill="none" stroke="#fff" strokeWidth="1.2" opacity="0.3"/>
+      {/* Letters TMS */}
+      <text x="100" y="78" textAnchor="middle" fontSize="22" fontWeight="bold" fill="#00008B" fontFamily="serif">T</text>
+      <text x="100" y="102" textAnchor="middle" fontSize="22" fontWeight="bold" fill="#fff" fontFamily="serif">M</text>
+      <text x="100" y="126" textAnchor="middle" fontSize="22" fontWeight="bold" fill="#00008B" fontFamily="serif">S</text>
+      {/* Wreath left */}
+      {[0,1,2,3,4].map(i=>(
+        <ellipse key={`wl${i}`} cx={28+i*2} cy={70+i*12} rx="7" ry="12" fill="#00008B" transform={`rotate(${-30+i*5},${28+i*2},${70+i*12})`}/>
+      ))}
+      {/* Wreath right */}
+      {[0,1,2,3,4].map(i=>(
+        <ellipse key={`wr${i}`} cx={172-i*2} cy={70+i*12} rx="7" ry="12" fill="#00008B" transform={`rotate(${30-i*5},${172-i*2},${70+i*12})`}/>
+      ))}
+      {/* Top text arc simulation */}
+      <text x="100" y="30" textAnchor="middle" fontSize="11" fontWeight="bold" fill="#8B0000" fontFamily="sans-serif">TONTI MODEL SCHOOL</text>
+      {/* Banner */}
+      <rect x="18" y="158" width="164" height="28" rx="14" fill="#00008B"/>
+      <text x="100" y="177" textAnchor="middle" fontSize="11" fontWeight="bold" fill="#fff" fontFamily="sans-serif">Grooming the Proper Child</text>
+    </svg>
+  );
+}
+
+/* Alphabet tile — shows the letter for that position */
+function AlphaTile({pos, n}){
+  const letters="ABCDEFGHIJKLMNOPQRSTUVWXY";
+  // For 3x3: 8 tiles = A-H, for 4x4: 15 tiles = A-O
+  const letter=letters[pos-1]||"?";
+  const colors=["#E53935","#8E24AA","#1E88E5","#00897B","#F4511E","#6D4C41","#039BE5","#43A047","#FDD835","#D81B60","#3949AB","#00ACC1","#7CB342","#FB8C00","#5E35B1"];
+  const bg=colors[(pos-1)%colors.length];
+  return(
+    <svg viewBox="0 0 100 100" width="100%" height="100%">
+      <rect width="100" height="100" fill={bg} rx="4"/>
+      <rect x="4" y="4" width="92" height="92" fill="none" stroke="rgba(255,255,255,0.4)" strokeWidth="2" rx="3"/>
+      <text x="50" y="68" textAnchor="middle" fontSize="54" fontWeight="bold" fill="#fff" fontFamily="Georgia,serif">{letter}</text>
+      <text x="50" y="90" textAnchor="middle" fontSize="13" fill="rgba(255,255,255,0.7)" fontFamily="sans-serif">{pos}</text>
+    </svg>
+  );
+}
+
+/* Plant tile — draws a sunflower divided into grid sections */
+function PlantTile({pos, n}){
+  const row=Math.floor((pos-1)/n), col=(pos-1)%n;
+  // Each tile is a viewport into a sunflower SVG (200x200)
+  const vx=(col/n)*200, vy=(row/n)*200, vw=200/n, vh=200/n;
+  return(
+    <svg viewBox={`${vx} ${vy} ${vw} ${vh}`} width="100%" height="100%" preserveAspectRatio="xMidYMid slice">
+      {/* Sky */}
+      <rect width="200" height="200" fill="#87CEEB"/>
+      {/* Sun */}
+      <circle cx="170" cy="25" r="18" fill="#FFD700"/>
+      {[0,45,90,135,180,225,270,315].map(a=>(
+        <line key={a} x1={170+Math.cos(a*Math.PI/180)*20} y1={25+Math.sin(a*Math.PI/180)*20}
+              x2={170+Math.cos(a*Math.PI/180)*28} y2={25+Math.sin(a*Math.PI/180)*28}
+              stroke="#FFD700" strokeWidth="3"/>
+      ))}
+      {/* Grass */}
+      <rect x="0" y="160" width="200" height="40" fill="#4CAF50"/>
+      {/* Stem */}
+      <line x1="100" y1="155" x2="100" y2="80" stroke="#388E3C" strokeWidth="7"/>
+      {/* Leaves */}
+      <ellipse cx="78" cy="125" rx="22" ry="10" fill="#66BB6A" transform="rotate(-30,78,125)"/>
+      <ellipse cx="122" cy="110" rx="22" ry="10" fill="#66BB6A" transform="rotate(30,122,110)"/>
+      {/* Petals */}
+      {[0,40,80,120,160,200,240,280,320].map(a=>(
+        <ellipse key={a} cx={100+Math.cos(a*Math.PI/180)*28} cy={80+Math.sin(a*Math.PI/180)*28}
+          rx="10" ry="18" fill="#FDD835"
+          transform={`rotate(${a},${100+Math.cos(a*Math.PI/180)*28},${80+Math.sin(a*Math.PI/180)*28})`}/>
+      ))}
+      {/* Center */}
+      <circle cx="100" cy="80" r="22" fill="#5D4037"/>
+      <circle cx="100" cy="80" r="16" fill="#4E342E"/>
+      {[0,1,2,3,4,5,6,7,8].map(i=>(
+        <circle key={i} cx={100+Math.cos(i*40*Math.PI/180)*9} cy={80+Math.sin(i*40*Math.PI/180)*9} r="3" fill="#795548"/>
+      ))}
+      {/* Soil pot */}
+      <ellipse cx="100" cy="175" rx="30" ry="8" fill="#795548"/>
+      <path d="M75,170 Q100,185 125,170 L120,195 Q100,200 80,195 Z" fill="#8D6E63"/>
+      {/* Label */}
+      <text x="100" y="200" textAnchor="middle" fontSize="10" fill="#fff" fontFamily="sans-serif" dy="-2">Sunflower</text>
+    </svg>
+  );
+}
+
+/* Animal tile — draws a cow divided into grid sections */
+function AnimalTile({pos, n}){
+  const row=Math.floor((pos-1)/n), col=(pos-1)%n;
+  const vx=(col/n)*200, vy=(row/n)*200, vw=200/n, vh=200/n;
+  return(
+    <svg viewBox={`${vx} ${vy} ${vw} ${vh}`} width="100%" height="100%" preserveAspectRatio="xMidYMid slice">
+      {/* Background field */}
+      <rect width="200" height="200" fill="#87CEEB"/>
+      <rect x="0" y="140" width="200" height="60" fill="#7CB342"/>
+      {/* Fence */}
+      {[20,60,100,140,160].map(x=><rect key={x} x={x} y="130" width="6" height="20" fill="#8D6E63"/>)}
+      <rect x="20" y="134" width="150" height="5" fill="#8D6E63"/>
+      {/* Body */}
+      <ellipse cx="100" cy="108" rx="58" ry="36" fill="#fff" stroke="#ccc" strokeWidth="2"/>
+      {/* Spots */}
+      <ellipse cx="85" cy="100" rx="15" ry="12" fill="#333" opacity="0.8"/>
+      <ellipse cx="120" cy="115" rx="12" ry="9" fill="#333" opacity="0.8"/>
+      <ellipse cx="75" cy="120" rx="8" ry="6" fill="#555" opacity="0.6"/>
+      {/* Head */}
+      <ellipse cx="148" cy="88" rx="26" ry="22" fill="#fff" stroke="#ccc" strokeWidth="2"/>
+      {/* Eye */}
+      <circle cx="157" cy="82" r="5" fill="#333"/>
+      <circle cx="158" cy="81" r="2" fill="#fff"/>
+      {/* Nose */}
+      <ellipse cx="166" cy="94" rx="10" ry="7" fill="#FFCDD2"/>
+      <circle cx="163" cy="94" r="2.5" fill="#E57373"/>
+      <circle cx="169" cy="94" r="2.5" fill="#E57373"/>
+      {/* Ears */}
+      <ellipse cx="133" cy="70" rx="7" ry="12" fill="#fff" stroke="#ccc" strokeWidth="2" transform="rotate(-20,133,70)"/>
+      <ellipse cx="160" cy="67" rx="7" ry="12" fill="#fff" stroke="#ccc" strokeWidth="2" transform="rotate(15,160,67)"/>
+      {/* Horns */}
+      <path d="M138,62 Q132,48 138,44" stroke="#D4A96A" strokeWidth="4" fill="none" strokeLinecap="round"/>
+      <path d="M154,60 Q160,46 156,42" stroke="#D4A96A" strokeWidth="4" fill="none" strokeLinecap="round"/>
+      {/* Legs */}
+      {[58,74,116,130].map(x=>(
+        <rect key={x} x={x} y="138" width="12" height="30" rx="5" fill="#fff" stroke="#ddd" strokeWidth="1"/>
+      ))}
+      {/* Hooves */}
+      {[58,74,116,130].map(x=>(
+        <rect key={`h${x}`} x={x} y="162" width="12" height="8" rx="3" fill="#555"/>
+      ))}
+      {/* Udder */}
+      <ellipse cx="88" cy="142" rx="18" ry="10" fill="#FFCDD2"/>
+      {/* Tail */}
+      <path d="M44,108 Q20,100 22,120 Q24,135 35,132" stroke="#ccc" strokeWidth="4" fill="none" strokeLinecap="round"/>
+      <ellipse cx="37" cy="130" rx="6" ry="9" fill="#ddd" transform="rotate(20,37,130)"/>
+      {/* Label */}
+      <rect x="30" y="155" width="80" height="16" rx="8" fill="rgba(0,0,0,0.35)"/>
+      <text x="70" y="167" textAnchor="middle" fontSize="10" fill="#fff" fontFamily="sans-serif" fontWeight="bold">Cow</text>
+    </svg>
+  );
+}
+
+/* ── Preview of solved puzzle ── */
+function PuzzlePreview({cat, n}){
+  const tiles=Array.from({length:n*n-1},(_,i)=>i+1);
+  return(
+    <div style={{display:"grid",gridTemplateColumns:`repeat(${n},1fr)`,gap:2,width:80,height:80,borderRadius:6,overflow:"hidden",border:"2px solid rgba(255,255,255,0.4)"}}>
+      {tiles.map(v=>(
+        <div key={v} style={{width:"100%",height:"100%",overflow:"hidden"}}>
+          {cat==="numbers"&&<div style={{width:"100%",height:"100%",background:C.woodM,display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,fontWeight:"bold",color:C.text}}>{v}</div>}
+          {cat==="logo"&&<LogoTile pos={v} n={n}/>}
+          {cat==="alphabet"&&<AlphaTile pos={v} n={n}/>}
+          {cat==="plant"&&<PlantTile pos={v} n={n}/>}
+          {cat==="animal"&&<AnimalTile pos={v} n={n}/>}
+        </div>
+      ))}
+      <div style={{background:"#4A3020",width:"100%",height:"100%"}}/>
+    </div>
+  );
+}
+
+/* ── Render a single tile ── */
+function TileContent({val, cat, n}){
+  if(cat==="numbers") return <span style={{fontSize:`clamp(${n===3?22:16}px,${n===3?8:6}vw,${n===3?46:34}px)`,fontWeight:"bold",fontFamily:"Georgia",color:C.text,position:"relative",zIndex:1}}>{val}</span>;
+  if(cat==="logo")    return <LogoTile pos={val} n={n}/>;
+  if(cat==="alphabet") return <AlphaTile pos={val} n={n}/>;
+  if(cat==="plant")   return <PlantTile pos={val} n={n}/>;
+  if(cat==="animal")  return <AnimalTile pos={val} n={n}/>;
+  return null;
+}
+
+/* ═══════════════════════════════════════════
+   MAIN APP
+═══════════════════════════════════════════ */
+function App(){
+  const [screen,setScreen]         = useState("home");
+  const [player,setPlayer]         = useState(null);
+  const [nameInput,setNameInput]   = useState("");
+  const [roleInput,setRoleInput]   = useState("Pupil");
+  const [classInput,setClassInput] = useState("Primary 1");
+  const [cat,setCat]               = useState("numbers");
+  const [size,setSize]             = useState(3);
+  const [tiles,setTiles]           = useState([]);
+  const [steps,setSteps]           = useState(0);
+  const [sec,setSec]               = useState(0);
+  const [running,setRunning]       = useState(false);
+  const [leaderboard,setLeaderboard] = useState([]);
+  const [lastResult,setLastResult] = useState(null);
+  const [movingIdx,setMovingIdx]   = useState(null);
+  const [lbTab,setLbTab]           = useState("all");
+  const [lbCatTab,setLbCatTab]     = useState("all");
+  const [syncing,setSyncing]       = useState(false);
+  const [showPreview,setShowPreview] = useState(false);
+  const timerRef = useRef(null);
+
+  useEffect(()=>{
+    const local=JSON.parse(localStorage.getItem(LS_KEY)||"[]");
+    setLeaderboard(local);
+    fetchRemote().then(remote=>{
+      if(!remote)return;
+      const merged=mergeBoards(local,remote);
+      setLeaderboard(merged);
+      localStorage.setItem(LS_KEY,JSON.stringify(merged));
+    });
+  },[]);
+
+  async function saveBoard(board){
+    setLeaderboard(board);
+    localStorage.setItem(LS_KEY,JSON.stringify(board));
+    setSyncing(true);
+    await pushRemote(board);
+    setSyncing(false);
+  }
+
+  useEffect(()=>{
+    if(running){timerRef.current=setInterval(()=>setSec(s=>s+1),1000);}
+    else clearInterval(timerRef.current);
+    return()=>clearInterval(timerRef.current);
+  },[running]);
+
+  function startGame(selCat, selSize){
+    const t=shuffleTiles(selSize||size);
+    setTiles(t);setSteps(0);setSec(0);setRunning(true);
+    if(selCat)setCat(selCat);
+    if(selSize)setSize(selSize);
+    setScreen("game");
+  }
+
+  function tryMove(idx){
+    const empty=tiles.indexOf(0);
+    const er=Math.floor(empty/size),ec=empty%size;
+    const r=Math.floor(idx/size),c=idx%size;
+    if(!((r===er&&Math.abs(c-ec)===1)||(c===ec&&Math.abs(r-er)===1)))return;
+    setMovingIdx(idx);setTimeout(()=>setMovingIdx(null),160);
+    const nt=[...tiles];[nt[idx],nt[empty]]=[nt[empty],nt[idx]];
+    const ns=steps+1;setSteps(ns);setTiles(nt);
+    if(isSolved(nt)){
+      setRunning(false);
+      const sc=scoreCalc(ns,sec,size,cat);
+      const result={name:player.name,role:player.role,cls:player.cls,steps:ns,time:sec,score:sc,size,cat,school:SCHOOL_NAME,date:new Date().toLocaleDateString()};
+      setLastResult(result);
+      saveBoard(mergeBoards([result],leaderboard));
+      setScreen("win");
+    }
+  }
+
+  function doHint(){
+    const path=astar(tiles,size);
+    if(path&&path.length>0)tryMove(path[0]);
+  }
+
+  function newGame(){startGame(cat,size);}
+
+  /* share */
+  function shareWhatsApp(){
+    const rank=leaderboard.findIndex(e=>e.name===lastResult.name&&e.score===lastResult.score)+1;
+    const catInfo=CATEGORIES.find(c=>c.id===lastResult.cat)||CATEGORIES[0];
+    const text=encodeURIComponent(
+      `🏆 ${SCHOOL_NAME} – Sliding Puzzle\n`+
+      `${catInfo.icon} Mode: ${catInfo.label}\n`+
+      `👤 ${lastResult.name} (${lastResult.cls})\n`+
+      `⭐ Score: ${lastResult.score} pts\n`+
+      `🔢 Steps: ${lastResult.steps} · ⏱ Time: ${fmtTime(lastResult.time)}\n`+
+      `🏅 Rank #${rank} on leaderboard!\n`+
+      `"${SCHOOL_MOTTO}" 🎮`
+    );
+    window.open(`https://wa.me/?text=${text}`,"_blank");
+  }
+  function shareFacebook(){
+    const text=encodeURIComponent(`🏆 I scored ${lastResult.score} pts on ${SCHOOL_NAME} Sliding Puzzle! Mode: ${lastResult.cat}. Can you beat me? 🎮 "${SCHOOL_MOTTO}"`);
+    window.open(`https://www.facebook.com/sharer/sharer.php?quote=${text}`,"_blank");
+  }
+  function downloadImage(){
+    const canvas=document.createElement("canvas");
+    canvas.width=540;canvas.height=340;
+    const ctx=canvas.getContext("2d");
+    // Background gradient
+    const grad=ctx.createLinearGradient(0,0,540,340);
+    grad.addColorStop(0,"#8B0000");grad.addColorStop(1,"#00008B");
+    ctx.fillStyle=grad;ctx.fillRect(0,0,540,340);
+    // White card
+    ctx.fillStyle="#fff";ctx.beginPath();ctx.roundRect(18,18,504,304,16);ctx.fill();
+    // School name
+    ctx.fillStyle="#8B0000";ctx.font="bold 17px Georgia";ctx.textAlign="center";
+    ctx.fillText(SCHOOL_NAME,270,52);
+    ctx.fillStyle="#666";ctx.font="12px sans-serif";
+    ctx.fillText(`"${SCHOOL_MOTTO}"`,270,70);
+    // Trophy
+    ctx.font="48px serif";ctx.fillText("🏆",270,118);
+    // Player name
+    ctx.fillStyle=C.text;ctx.font="bold 22px Georgia";
+    ctx.fillText(lastResult.name,270,150);
+    ctx.font="13px sans-serif";ctx.fillStyle="#666";
+    const catInfo=CATEGORIES.find(c=>c.id===lastResult.cat)||CATEGORIES[0];
+    ctx.fillText(`${lastResult.cls} · ${lastResult.role} · ${catInfo.icon} ${catInfo.label}`,270,170);
+    // Score
+    ctx.font="bold 30px Georgia";ctx.fillStyle=C.gold;
+    ctx.fillText(`${lastResult.score} pts`,270,206);
+    ctx.font="14px sans-serif";ctx.fillStyle="#555";
+    ctx.fillText(`${lastResult.steps} steps · ${fmtTime(lastResult.time)} · ${lastResult.size}×${lastResult.size} grid`,270,228);
+    const rank=leaderboard.findIndex(e=>e.name===lastResult.name&&e.score===lastResult.score)+1;
+    ctx.font="bold 13px sans-serif";ctx.fillStyle="#00008B";
+    ctx.fillText(`Rank #${rank} on leaderboard · ${lastResult.date}`,270,254);
+    // Footer
+    ctx.fillStyle="#bbb";ctx.font="11px sans-serif";
+    ctx.fillText("TMS School Sliding Puzzle Challenge",270,290);
+    const a=document.createElement("a");
+    a.download=`TMS-puzzle-${lastResult.name}.png`;
+    a.href=canvas.toDataURL();a.click();
+  }
+
+  const catLabel=CATEGORIES.find(c=>c.id===cat)||CATEGORIES[0];
+  const filtered=leaderboard.filter(e=>{
+    const roleOk=lbTab==="all"||e.role===(lbTab==="pupils"?"Pupil":lbTab==="staff"?"Staff":"Parent");
+    const catOk=lbCatTab==="all"||e.cat===lbCatTab;
+    return roleOk&&catOk;
+  });
+
+  /* ══════════════════════════════════════
+     HOME SCREEN
+  ══════════════════════════════════════ */
+  if(screen==="home") return(
+    <div style={{minHeight:"100vh",background:C.bg,backgroundImage:"repeating-linear-gradient(90deg,transparent,transparent 28px,rgba(0,0,0,.04) 28px,rgba(0,0,0,.04) 30px),repeating-linear-gradient(0deg,transparent,transparent 28px,rgba(0,0,0,.04) 28px,rgba(0,0,0,.04) 30px)",display:"flex",flexDirection:"column",alignItems:"center"}}>
+      {/* Header */}
+      <div style={{width:"100%",maxWidth:480,background:"linear-gradient(135deg,#8B0000,#00008B)",padding:"18px 20px",display:"flex",alignItems:"center",gap:14}}>
+        <div style={{width:52,height:52,borderRadius:"50%",overflow:"hidden",border:"3px solid rgba(255,255,255,0.4)",flexShrink:0,background:"#fff",display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <TMSLogoFull/>
+        </div>
+        <div style={{flex:1}}>
+          <div style={{color:"#fff",fontWeight:"bold",fontSize:17,fontFamily:"Georgia",lineHeight:1.2}}>{SCHOOL_NAME}</div>
+          <div style={{color:"rgba(255,255,255,0.7)",fontSize:11,fontStyle:"italic"}}>"{SCHOOL_MOTTO}"</div>
+          <div style={{color:"rgba(255,255,255,0.6)",fontSize:11,marginTop:2}}>Sliding Puzzle Challenge</div>
+        </div>
+        <button onClick={()=>setScreen("board")} style={{background:"rgba(255,255,255,.15)",border:"1px solid rgba(255,255,255,.3)",color:"#fff",borderRadius:8,padding:"7px 12px",cursor:"pointer",fontSize:12,fontWeight:"bold"}}>🏆 Board</button>
+      </div>
+
+      <div style={{width:"100%",maxWidth:480,padding:"14px 14px 0",display:"flex",flexDirection:"column",gap:12}}>
+        {/* Player info */}
+        <div style={{background:"#fff",borderRadius:14,padding:"14px",boxShadow:"0 2px 10px rgba(0,0,0,.1)"}}>
+          <div style={{fontSize:13,color:"#888",marginBottom:8,fontWeight:"bold"}}>👤 Player Info</div>
+          <input value={nameInput} onChange={e=>setNameInput(e.target.value)} placeholder="Enter your full name"
+            style={{width:"100%",padding:"10px 12px",borderRadius:8,border:"1.5px solid #ddd",fontSize:15,boxSizing:"border-box",marginBottom:10}}/>
+          <div style={{display:"flex",gap:8,marginBottom:10}}>
+            {ROLES.map(r=>(
+              <button key={r} onClick={()=>{setRoleInput(r);setClassInput(r==="Pupil"?"Primary 1":r==="Staff"?"Staff":"Parent/Guardian");}}
+                style={{flex:1,padding:"8px 0",borderRadius:8,border:`2px solid ${roleInput===r?"#00008B":"#ddd"}`,background:roleInput===r?"#E8EAF6":"#fff",color:roleInput===r?"#00008B":"#666",fontWeight:"bold",fontSize:12,cursor:"pointer"}}>
+                {r==="Pupil"?"🎒 Pupil":r==="Staff"?"📚 Staff":"👨‍👩‍👧 Parent"}
+              </button>
+            ))}
+          </div>
+          <select value={classInput} onChange={e=>setClassInput(e.target.value)}
+            style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1.5px solid #ddd",fontSize:14,background:"#fff"}}>
+            {CLASSES.map(c=><option key={c}>{c}</option>)}
+          </select>
+        </div>
+
+        {/* Category picker */}
+        <div style={{background:"#fff",borderRadius:14,padding:"14px",boxShadow:"0 2px 10px rgba(0,0,0,.1)"}}>
+          <div style={{fontSize:13,color:"#888",marginBottom:10,fontWeight:"bold"}}>🎮 Choose Puzzle Mode</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+            {CATEGORIES.map(c=>(
+              <button key={c.id} onClick={()=>setCat(c.id)}
+                style={{padding:"12px 8px",borderRadius:10,border:`2px solid ${cat===c.id?c.color:"#ddd"}`,background:cat===c.id?`${c.color}18`:"#fff",cursor:"pointer",textAlign:"left",transition:"all .15s"}}>
+                <div style={{fontSize:22,marginBottom:4}}>{c.icon}</div>
+                <div style={{fontWeight:"bold",fontSize:13,color:cat===c.id?c.color:"#444"}}>{c.label}</div>
+                <div style={{fontSize:10,color:"#999",marginTop:2}}>{c.desc}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Size & preview */}
+        <div style={{background:"#fff",borderRadius:14,padding:"14px",boxShadow:"0 2px 10px rgba(0,0,0,.1)"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <div style={{fontSize:13,color:"#888",fontWeight:"bold"}}>📐 Grid Size</div>
+            <button onClick={()=>setShowPreview(p=>!p)} style={{fontSize:12,color:C.teal,background:"none",border:`1px solid ${C.teal}`,borderRadius:6,padding:"3px 8px",cursor:"pointer"}}>{showPreview?"Hide":"Preview"} ▸</button>
+          </div>
+          <div style={{display:"flex",gap:10,marginBottom:showPreview?12:0}}>
+            {[3,4].map(s=>(
+              <button key={s} onClick={()=>setSize(s)}
+                style={{flex:1,padding:"11px 0",borderRadius:10,border:`2px solid ${size===s?C.gold:"#ddd"}`,background:size===s?C.goldL:"#fff",color:size===s?C.text:"#666",fontWeight:"bold",fontSize:15,cursor:"pointer"}}>
+                {s}×{s}<br/><span style={{fontSize:10,fontWeight:"normal"}}>{s===3?"Easy":"Hard"}</span>
+              </button>
+            ))}
+          </div>
+          {showPreview&&(
+            <div style={{display:"flex",alignItems:"center",gap:12,padding:"10px",background:"#f5f5f5",borderRadius:10}}>
+              <PuzzlePreview cat={cat} n={size}/>
+              <div>
+                <div style={{fontSize:13,fontWeight:"bold",color:"#444"}}>Solved state</div>
+                <div style={{fontSize:11,color:"#888",marginTop:4}}>Rearrange tiles to match this pattern</div>
+                <div style={{fontSize:11,color:catLabel.color,marginTop:6,fontWeight:"bold"}}>{catLabel.icon} {catLabel.label}</div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <button onClick={()=>{
+          if(!nameInput.trim())return;
+          setPlayer({name:nameInput.trim(),role:roleInput,cls:classInput});
+          startGame(cat,size);
+        }} disabled={!nameInput.trim()}
+          style={{background:nameInput.trim()?`linear-gradient(135deg,#8B0000,#00008B)`:"#ccc",color:"#fff",border:"none",borderRadius:12,padding:"16px",fontSize:18,fontWeight:"bold",cursor:nameInput.trim()?"pointer":"not-allowed",fontFamily:"Georgia",boxShadow:nameInput.trim()?"0 4px 16px rgba(139,0,0,.35)":"none",marginBottom:16}}>
+          🎮 Start Puzzle
+        </button>
+      </div>
+    </div>
+  );
+
+  /* ══════════════════════════════════════
+     GAME SCREEN
+  ══════════════════════════════════════ */
+  if(screen==="game") return(
+    <div style={{minHeight:"100vh",background:C.bg,backgroundImage:"repeating-linear-gradient(90deg,transparent,transparent 28px,rgba(0,0,0,.04) 28px,rgba(0,0,0,.04) 30px),repeating-linear-gradient(0deg,transparent,transparent 28px,rgba(0,0,0,.04) 28px,rgba(0,0,0,.04) 30px)",display:"flex",flexDirection:"column",alignItems:"center"}}>
+      {/* Topbar */}
+      <div style={{width:"100%",maxWidth:480,background:"linear-gradient(135deg,#8B0000,#00008B)",display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px"}}>
+        <button onClick={()=>{setRunning(false);setScreen("home");}} style={{width:42,height:42,borderRadius:"50%",border:"none",background:`radial-gradient(circle at 35% 35%,${C.woodL},${C.woodD})`,cursor:"pointer",fontSize:18,boxShadow:"inset 0 -2px 5px rgba(0,0,0,.4)"}}>←</button>
+        <div style={{textAlign:"center"}}>
+          <div style={{color:"#fff",fontWeight:"bold",fontSize:14,fontFamily:"Georgia"}}>{SCHOOL_NAME}</div>
+          <div style={{color:"rgba(255,255,255,.6)",fontSize:11}}>{catLabel.icon} {catLabel.label} · {size}×{size}</div>
+        </div>
+        <button onClick={()=>{setRunning(false);setScreen("board");}} style={{width:42,height:42,borderRadius:"50%",border:"none",background:`radial-gradient(circle at 35% 35%,${C.woodL},${C.woodD})`,cursor:"pointer",fontSize:16,boxShadow:"inset 0 -2px 5px rgba(0,0,0,.4)"}}>🏆</button>
+      </div>
+
+      {/* Stats */}
+      <div style={{width:"100%",maxWidth:480,display:"flex",justifyContent:"space-between",padding:"8px 12px",gap:8}}>
+        <div style={{background:C.red,color:C.gold,fontWeight:"bold",fontSize:14,padding:"6px 12px",borderRadius:8,border:"2px solid #9A0000"}}>Steps: {steps}</div>
+        <div style={{background:"#1a1a1a",color:C.gold,fontWeight:"bold",fontSize:14,padding:"6px 12px",borderRadius:8,border:"2px solid #333"}}>⏱ {fmtTime(sec)}</div>
+        <div style={{background:"#00008B",color:"#fff",fontSize:13,padding:"6px 12px",borderRadius:8,fontWeight:"bold"}}>⭐ {scoreCalc(steps,sec,size,cat)}</div>
+      </div>
+
+      {/* Player tag */}
+      <div style={{width:"100%",maxWidth:480,padding:"0 12px 4px",display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+        <span style={pill(C.tealL,C.teal)}>{player?.name}</span>
+        <span style={pill(C.goldL,C.text)}>{player?.cls}</span>
+        <span style={pill(C.purpleL,C.purple)}>{player?.role}</span>
+      </div>
+
+      {/* Board */}
+      <div style={{padding:"0 10px 10px",width:"100%",maxWidth:480,display:"flex",justifyContent:"center"}}>
+        <div style={{background:C.dark,border:`4px solid ${C.gold}`,borderRadius:18,boxShadow:"0 6px 24px rgba(0,0,0,.5),inset 0 0 12px rgba(0,0,0,.6)",padding:6,display:"grid",gridTemplateColumns:`repeat(${size},1fr)`,gap:cat==="numbers"?6:3,width:`min(${size*108}px,94vw)`,height:`min(${size*108}px,94vw)`}}>
+          {tiles.map((val,idx)=>{
+            const isEmpty=val===0;
+            const isNum=cat==="numbers";
+            return(
+              <div key={idx} onClick={()=>!isEmpty&&tryMove(idx)}
+                style={{borderRadius:isNum?12:6,display:"flex",alignItems:"center",justifyContent:"center",
+                  cursor:isEmpty?"default":"pointer",
+                  transition:"transform .12s",
+                  transform:movingIdx===idx?"scale(0.91)":"scale(1)",
+                  overflow:"hidden",
+                  background:isEmpty?C.dark:isNum?`repeating-linear-gradient(105deg,transparent,transparent 6px,rgba(255,255,255,.06) 6px,rgba(255,255,255,.06) 7px),radial-gradient(ellipse at 30% 30%,${C.woodL} 0%,${C.woodM} 60%,${C.woodM} 100%)`:"#fff",
+                  boxShadow:isEmpty?"inset 0 4px 12px rgba(0,0,0,.8)":"inset 0 3px 8px rgba(255,255,255,.35),inset 0 -3px 6px rgba(0,0,0,.3),2px 4px 8px rgba(0,0,0,.4)",
+                  position:"relative"
+                }}>
+                {!isEmpty&&isNum&&<div style={{position:"absolute",inset:0,background:"linear-gradient(160deg,rgba(255,255,255,.2) 0%,transparent 55%)",pointerEvents:"none"}}/>}
+                {!isEmpty&&<TileContent val={val} cat={cat} n={size}/>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Buttons */}
+      <div style={{display:"flex",gap:10,padding:"0 14px 8px",width:"100%",maxWidth:480}}>
+        <button onClick={newGame} style={{flex:1,padding:"12px 0",borderRadius:10,border:"none",background:"linear-gradient(135deg,#8B0000,#00008B)",color:"#fff",fontWeight:"bold",fontSize:14,cursor:"pointer"}}>🔀 New Game</button>
+        {size===3&&cat==="numbers"&&<button onClick={doHint} style={{flex:1,padding:"12px 0",borderRadius:10,border:"none",background:`linear-gradient(135deg,${C.woodL},${C.woodM})`,color:C.text,fontWeight:"bold",fontSize:14,cursor:"pointer"}}>💡 Hint</button>}
+        <button onClick={()=>{setShowPreview(true);setScreen("preview");}} style={{flex:1,padding:"12px 0",borderRadius:10,border:"none",background:"#333",color:"#fff",fontWeight:"bold",fontSize:14,cursor:"pointer"}}>👁 Goal</button>
+      </div>
+    </div>
+  );
+
+  /* ── Preview overlay screen ── */
+  if(screen==="preview") return(
+    <div style={{minHeight:"100vh",background:"rgba(0,0,0,.85)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{background:"#fff",borderRadius:16,padding:"20px",maxWidth:340,width:"100%",textAlign:"center"}}>
+        <div style={{fontSize:18,fontWeight:"bold",color:C.text,marginBottom:4}}>🎯 Goal — Solved State</div>
+        <div style={{fontSize:13,color:"#888",marginBottom:14}}>Rearrange tiles to match this</div>
+        <div style={{display:"grid",gridTemplateColumns:`repeat(${size},1fr)`,gap:3,borderRadius:10,overflow:"hidden",border:`3px solid ${C.gold}`,marginBottom:16}}>
+          {Array.from({length:size*size},(_,i)=>i).map(i=>{
+            const val=i+1<=size*size-1?i+1:0;
+            return(
+              <div key={i} style={{aspectRatio:"1",overflow:"hidden",background:val===0?C.dark:"#fff"}}>
+                {val>0&&<TileContent val={val} cat={cat} n={size}/>}
+              </div>
+            );
+          })}
+        </div>
+        <button onClick={()=>setScreen("game")} style={{width:"100%",padding:"13px",borderRadius:10,border:"none",background:"linear-gradient(135deg,#8B0000,#00008B)",color:"#fff",fontWeight:"bold",fontSize:15,cursor:"pointer"}}>▶ Back to Game</button>
+      </div>
+    </div>
+  );
+
+  /* ══════════════════════════════════════
+     WIN SCREEN
+  ══════════════════════════════════════ */
+  if(screen==="win"&&lastResult){
+    const rank=leaderboard.findIndex(e=>e.name===lastResult.name&&e.score===lastResult.score)+1;
+    const catInfo=CATEGORIES.find(c=>c.id===lastResult.cat)||CATEGORIES[0];
+    return(
+      <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#8B0000,#00008B)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:14}}>
+        <div className="win-anim" style={{background:"#fff",borderRadius:20,padding:"22px 18px",maxWidth:420,width:"100%",boxShadow:"0 12px 40px rgba(0,0,0,.4)",textAlign:"center"}}>
+          <div style={{fontSize:50,marginBottom:4}}>🏆</div>
+          <div style={{fontFamily:"Georgia",fontSize:24,fontWeight:"bold",color:C.text,marginBottom:2}}>Puzzle Solved!</div>
+          <div style={{color:"#888",fontSize:12,marginBottom:4}}>{SCHOOL_NAME}</div>
+          <div style={{fontSize:13,color:catInfo.color,fontWeight:"bold",marginBottom:14}}>{catInfo.icon} {catInfo.label} Mode</div>
+
+          <div style={{background:C.goldL,borderRadius:12,padding:"12px",marginBottom:12}}>
+            <div style={{fontSize:32,fontWeight:"bold",color:C.gold,fontFamily:"Georgia"}}>{lastResult.score} pts</div>
+            <div style={{fontSize:11,color:"#888"}}>Your Score</div>
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:12}}>
+            {[["🔢","Steps",lastResult.steps],["⏱","Time",fmtTime(lastResult.time)],["🎮","Grid",`${lastResult.size}×${lastResult.size}`]].map(([ic,lb,val])=>(
+              <div key={lb} style={{background:C.tealL,borderRadius:8,padding:"8px 4px"}}>
+                <div style={{fontSize:16}}>{ic}</div>
+                <div style={{fontWeight:"bold",fontSize:14,color:C.teal}}>{val}</div>
+                <div style={{fontSize:10,color:"#888"}}>{lb}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{display:"flex",gap:6,justifyContent:"center",marginBottom:12,flexWrap:"wrap"}}>
+            <span style={pill(C.tealL,C.teal)}>{lastResult.name}</span>
+            <span style={pill(C.goldL,C.text)}>{lastResult.cls}</span>
+            <span style={pill(C.purpleL,C.purple)}>{lastResult.role}</span>
+            <span style={pill(C.greenL,C.green)}>🏅 Rank #{rank}</span>
+          </div>
+
+          {syncing&&<div style={{fontSize:11,color:C.teal,marginBottom:6}}>⏳ Syncing scores…</div>}
+
+          <div style={{marginBottom:12}}>
+            <div style={{fontSize:12,color:"#888",marginBottom:6}}>Share your result</div>
+            <div style={{display:"flex",gap:7,justifyContent:"center",flexWrap:"wrap"}}>
+              <button onClick={shareWhatsApp} style={{padding:"9px 12px",borderRadius:8,border:"none",background:"#25D366",color:"#fff",fontWeight:"bold",fontSize:12,cursor:"pointer"}}>📱 WhatsApp</button>
+              <button onClick={shareFacebook} style={{padding:"9px 12px",borderRadius:8,border:"none",background:"#1877F2",color:"#fff",fontWeight:"bold",fontSize:12,cursor:"pointer"}}>📘 Facebook</button>
+              <button onClick={downloadImage} style={{padding:"9px 12px",borderRadius:8,border:"none",background:"#333",color:"#fff",fontWeight:"bold",fontSize:12,cursor:"pointer"}}>⬇ Image</button>
+            </div>
+          </div>
+
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={newGame} style={{flex:1,padding:"12px",borderRadius:10,border:"none",background:"linear-gradient(135deg,#8B0000,#00008B)",color:"#fff",fontWeight:"bold",fontSize:14,cursor:"pointer"}}>🎮 Play Again</button>
+            <button onClick={()=>setScreen("home")} style={{flex:1,padding:"12px",borderRadius:10,border:"none",background:`linear-gradient(135deg,${C.woodL},${C.woodM})`,color:C.text,fontWeight:"bold",fontSize:14,cursor:"pointer"}}>🏠 Home</button>
+            <button onClick={()=>setScreen("board")} style={{flex:1,padding:"12px",borderRadius:10,border:"none",background:`linear-gradient(135deg,${C.teal},${C.tealD})`,color:"#fff",fontWeight:"bold",fontSize:14,cursor:"pointer"}}>🏆 Board</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* ══════════════════════════════════════
+     LEADERBOARD SCREEN
+  ══════════════════════════════════════ */
+  if(screen==="board") return(
+    <div style={{minHeight:"100vh",background:C.bg,backgroundImage:"repeating-linear-gradient(90deg,transparent,transparent 28px,rgba(0,0,0,.04) 28px,rgba(0,0,0,.04) 30px),repeating-linear-gradient(0deg,transparent,transparent 28px,rgba(0,0,0,.04) 28px,rgba(0,0,0,.04) 30px)",display:"flex",flexDirection:"column",alignItems:"center"}}>
+      <div style={{width:"100%",maxWidth:480,background:"linear-gradient(135deg,#8B0000,#00008B)",padding:"12px 14px",display:"flex",alignItems:"center",gap:12}}>
+        <button onClick={()=>setScreen(lastResult?"win":"home")} style={{width:40,height:40,borderRadius:"50%",border:"none",background:`radial-gradient(circle at 35% 35%,${C.woodL},${C.woodD})`,cursor:"pointer",fontSize:18,boxShadow:"inset 0 -2px 5px rgba(0,0,0,.4)"}}>←</button>
+        <div>
+          <div style={{color:"#fff",fontWeight:"bold",fontSize:16,fontFamily:"Georgia"}}>🏆 Leaderboard</div>
+          <div style={{color:"rgba(255,255,255,.6)",fontSize:11}}>{SCHOOL_NAME}</div>
+        </div>
+        <button onClick={()=>setScreen("home")} style={{marginLeft:"auto",background:"rgba(255,255,255,.15)",border:"1px solid rgba(255,255,255,.3)",color:"#fff",borderRadius:8,padding:"6px 10px",cursor:"pointer",fontSize:12,fontWeight:"bold"}}>🎮 Play</button>
+      </div>
+
+      {/* Category filter */}
+      <div style={{width:"100%",maxWidth:480,padding:"8px 12px 0",overflowX:"auto"}}>
+        <div style={{display:"flex",gap:6,minWidth:"max-content"}}>
+          {[["all","All 🎮"],...CATEGORIES.map(c=>[c.id,`${c.icon} ${c.label}`])].map(([id,label])=>(
+            <button key={id} onClick={()=>setLbCatTab(id)}
+              style={{padding:"6px 12px",borderRadius:16,border:"none",background:lbCatTab===id?"#00008B":"rgba(255,255,255,.5)",color:lbCatTab===id?"#fff":"#444",fontWeight:lbCatTab===id?"bold":"normal",fontSize:11,cursor:"pointer",whiteSpace:"nowrap"}}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Role tabs */}
+      <div style={{width:"100%",maxWidth:480,display:"flex",padding:"8px 12px 0",gap:6}}>
+        {[["all","All"],["pupils","Pupils"],["staff","Staff"],["parents","Parents"]].map(([t,l])=>(
+          <button key={t} onClick={()=>setLbTab(t)}
+            style={{flex:1,padding:"8px 4px",borderRadius:"8px 8px 0 0",border:"none",background:lbTab===t?"#fff":"rgba(255,255,255,.4)",color:lbTab===t?"#8B0000":"#555",fontWeight:lbTab===t?"bold":"normal",fontSize:12,cursor:"pointer"}}>
+            {l}
+          </button>
+        ))}
+      </div>
+
+      <div style={{width:"100%",maxWidth:480,background:"#fff",borderRadius:"0 0 16px 16px",overflow:"hidden",boxShadow:"0 4px 16px rgba(0,0,0,.1)",marginBottom:14}}>
+        {filtered.length===0?(
+          <div style={{padding:"36px 20px",textAlign:"center",color:"#aaa"}}>
+            <div style={{fontSize:38,marginBottom:8}}>📋</div>
+            No scores yet — be the first!
+          </div>
+        ):(
+          filtered.map((e,i)=>{
+            const ci=CATEGORIES.find(c=>c.id===e.cat)||CATEGORIES[0];
+            return(
+              <div key={i} style={{display:"flex",alignItems:"center",padding:"10px 14px",borderBottom:"1px solid #f0f0f0",background:i%2===0?"#fff":"#fafafa"}}>
+                <div style={{width:32,height:32,borderRadius:"50%",background:rankColor(i),display:"flex",alignItems:"center",justifyContent:"center",fontWeight:"bold",fontSize:13,marginRight:10,flexShrink:0,color:i<3?"#333":"#999"}}>
+                  {i===0?"🥇":i===1?"🥈":i===2?"🥉":i+1}
+                </div>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontWeight:"bold",fontSize:14,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.name}</div>
+                  <div style={{fontSize:10,color:"#999",marginTop:1}}>{e.cls} · {e.role} · {ci.icon} {ci.label} · {e.size}×{e.size} · {e.date}</div>
+                </div>
+                <div style={{textAlign:"right",flexShrink:0}}>
+                  <div style={{fontWeight:"bold",fontSize:15,color:C.gold}}>{e.score}</div>
+                  <div style={{fontSize:10,color:"#aaa"}}>{e.steps}s · {fmtTime(e.time)}</div>
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {(!JSONBIN_ID||!JSONBIN_KEY)&&(
+        <div style={{width:"100%",maxWidth:480,background:"#FFF9E6",border:"1px solid #F0C040",borderRadius:12,padding:"12px 14px",margin:"0 12px 14px",fontSize:11,color:"#7A5C00",lineHeight:1.7}}>
+          <strong>📡 Enable cross-device leaderboard:</strong><br/>
+          1. Sign up free at <strong>jsonbin.io</strong><br/>
+          2. Create a Bin with: <code style={{background:"#eee",padding:"1px 4px",borderRadius:3}}>{"{\"leaderboard\":[]}"}</code><br/>
+          3. Paste your <strong>Bin ID</strong> + <strong>Master Key</strong> at the top of index.html
+        </div>
+      )}
+    </div>
+  );
+
+  return null;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
